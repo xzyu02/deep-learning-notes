@@ -10,4 +10,5 @@ Followed Dive Into Deep Learning Book by Dr. Mu Li
     - [My Notebook](./projects/house_prices_advanced_regression_techniques.ipynb), Score: 0.12931
 - [CIFAR-10 - Object Recognition in Images](https://www.kaggle.com/competitions/cifar-10)
     - [Demo Size Notebook](./projects/cifar-10-classification-demo-dataset.ipynb)
-- [Dog Breed Identification](https://www.kaggle.com/competitions/dog-breed-identification): [Submitted Notebook](https://www.kaggle.com/code/hughyu/imagenet-dogs-classfication), Score: 0.61794
+- [Dog Breed Identification](https://www.kaggle.com/competitions/dog-breed-identification): 
+    - [Submitted Notebook](https://www.kaggle.com/code/hughyu/imagenet-dogs-classfication), Score: 0.61794
