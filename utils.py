@@ -175,6 +175,18 @@ def evaluate_accuracy_gpu(net, data_iter, device=None):
             metric.add(accuracy(net(X), y), size(y))
     return metric[0] / metric[1]
 
+loss = nn.CrossEntropyLoss(reduction='none')
+
+def evaluate_loss(data_iter, net, devices):
+    l_sum, n = 0.0, 0
+    for features, labels in data_iter:
+        features, labels = features.to(devices[0]), labels.to(devices[0])
+        outputs = net(features)
+        l = loss(outputs, labels)
+        l_sum += l.sum()
+        n += labels.numel()
+    return l_sum / n
+
 """Data Loding"""
 import shutil
 import collections
@@ -203,15 +215,12 @@ def reorg_train_valid(data_dir, labels, valid_ratio):
     for train_file in os.listdir(os.path.join(data_dir, 'train')):
         label = labels[train_file.split('.')[0]]
         fname = os.path.join(data_dir, 'train', train_file)
-        copyfile(fname, os.path.join(data_dir, 'train_valid_test',
-                                     'train_valid', label))
+        copyfile(fname, os.path.join(data_dir, 'train_valid_test', 'train_valid', label))
         if label not in label_count or label_count[label] < n_valid_per_label:
-            copyfile(fname, os.path.join(data_dir, 'train_valid_test',
-                                         'valid', label))
+            copyfile(fname, os.path.join(data_dir, 'train_valid_test', 'valid', label))
             label_count[label] = label_count.get(label, 0) + 1
         else:
-            copyfile(fname, os.path.join(data_dir, 'train_valid_test',
-                                         'train', label))
+            copyfile(fname, os.path.join(data_dir, 'train_valid_test', 'train', label))
     return n_valid_per_label
 
 def reorg_test(data_dir):
@@ -220,6 +229,70 @@ def reorg_test(data_dir):
         copyfile(os.path.join(data_dir, 'test', test_file),
                  os.path.join(data_dir, 'train_valid_test', 'test', 'unknown'))
 
+"""Image Augmentation"""
+
+transform_train = torchvision.transforms.Compose([
+    # random scale object from 0.08 to 1 (full size)
+    torchvision.transforms.RandomResizedCrop(224, scale=(0.08, 1.0),
+                                             ratio=(3.0 / 4.0, 4.0 / 3.0)),
+    torchvision.transforms.RandomHorizontalFlip(),
+    # random change brightness, contrast, saturation by 40% up and down
+    torchvision.transforms.ColorJitter(brightness=0.4, contrast=0.4,
+                                       saturation=0.4),
+    torchvision.transforms.ToTensor(),
+    torchvision.transforms.Normalize([0.485, 0.456, 0.406],
+                                     [0.229, 0.224, 0.225])])
+
+transform_test = torchvision.transforms.Compose([
+    torchvision.transforms.Resize(256),
+    torchvision.transforms.CenterCrop(224),
+    torchvision.transforms.ToTensor(),
+    torchvision.transforms.Normalize([0.485, 0.456, 0.406],
+                                     [0.229, 0.224, 0.225])])
+
+"""Customized Dataset"""
+from PIL import Image
+data_dir = ""
+
+def label_map(labels):
+    unique_labels = sorted(list(set(labels.values()))) #sorting is necessary to reproduce the order of the labelmap
+    return dict(((label, i) for i, label in enumerate(unique_labels)))
+
+class DogsDataset(torch.utils.data.Dataset):
+    def __init__(self, is_train=False, transform=None):
+        self.is_train = is_train
+        self.images = sorted(os.listdir(os.path.join(data_dir, 'train' if self.is_train else 'test')))
+        self.labels = read_csv_labels(os.path.join(data_dir, 'labels.csv'))
+        self.label_map = label_map(self.labels)
+        self.transform = transform
+        
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        image_name = self.images[idx]
+        image = Image.open(os.path.join(data_dir, 'train' if self.is_train else 'test', image_name))
+        tensor = self.transform(image)
+        if self.is_train:
+            return tensor, self.label_map[self.labels[image_name[:-4]]]
+        return tensor
+
+def prepare_data(batch_size=32, valid_ratio=0.1):
+    train_valid_ds = DogsDataset(is_train=True, transform=transform_train)
+
+    train_size = math.floor(len(train_valid_ds) * (1 - valid_ratio))
+    valid_size = len(train_valid_ds) - train_size
+
+    train_ds, valid_ds = torch.utils.data.random_split(train_valid_ds, [train_size, valid_size])
+
+    train_iter, valid_iter, train_valid_iter = [
+    torch.utils.data.DataLoader(dataset, batch_size, shuffle=True, drop_last=True)
+        for dataset in (train_ds, valid_ds, train_valid_ds)]
+
+    test_ds_full = DogsDataset(is_train=False, transform=transform_test)
+    test_iter = torch.utils.data.DataLoader(test_ds_full, batch_size, shuffle=False, drop_last=False)
+
+    return train_iter, valid_iter, train_valid_iter, test_iter
 
 '''Training Section'''
 
@@ -273,3 +346,60 @@ def train(net, train_iter, valid_iter, num_epochs, lr, wd, devices, lr_period, l
         measures += f', valid acc {valid_acc:.3f}'
     print(measures + f'\n{metric[2] * num_epochs / timer.sum():.1f}'
           f' examples/sec on {str(devices)}')
+
+def train(net, train_iter, valid_iter, num_epochs, lr, wd, devices, lr_period, lr_decay):
+    net = nn.DataParallel(net, device_ids=devices).to(devices[0])
+    trainer = torch.optim.SGD(
+        (param for param in net.parameters() if param.requires_grad), lr=lr,
+        momentum=0.9, weight_decay=wd)
+    scheduler = torch.optim.lr_scheduler.StepLR(trainer, lr_period, lr_decay)
+    num_batches, timer = len(train_iter), Timer()
+    legend = ['train loss']
+    if valid_iter is not None:
+        legend.append('valid loss')
+    animator = Animator(xlabel='epoch', xlim=[1, num_epochs],
+                            legend=legend)
+    for epoch in range(num_epochs):
+        metric = Accumulator(2)
+        for i, (features, labels) in enumerate(train_iter):
+            timer.start()
+            features, labels = features.to(devices[0]), labels.to(devices[0])
+            trainer.zero_grad()
+            output = net(features)
+            l = loss(output, labels).sum()
+            l.backward()
+            trainer.step()
+            metric.add(l, labels.shape[0])
+            timer.stop()
+            if (i + 1) % (num_batches // 5) == 0 or i == num_batches - 1:
+                animator.add(epoch + (i + 1) / num_batches, (metric[0] / metric[1], None))
+        measures = f'train loss {metric[0] / metric[1]:.3f}'
+        if valid_iter is not None:
+            valid_loss = evaluate_loss(valid_iter, net, devices)
+            animator.add(epoch + 1, (None, valid_loss.detach().cpu()))
+        scheduler.step()
+    if valid_iter is not None:
+        measures += f', valid loss {valid_loss:.3f}'
+    print(measures + f'\n{metric[1] * num_epochs / timer.sum():.1f}'
+          f' examples/sec on {str(devices)}')
+
+"""Train Starter"""
+devices, num_epochs, lr, wd = try_all_gpus(), 10, 1e-4, 1e-4
+lr_period, lr_decay, net = 2, 0.9, get_net(devices)
+train(net, train_iter, valid_iter, num_epochs, lr, wd, devices, lr_period, lr_decay)
+
+"""Kaggle Save Submission"""
+net = get_net(devices)
+train(net, train_valid_iter, None, num_epochs, lr, wd, devices, lr_period, lr_decay)
+
+preds = []
+for data in test_iter:
+    output = torch.nn.functional.softmax(net(data.to(devices[0])), dim=1)
+    preds.extend(output.cpu().detach().numpy())
+ids = sorted(os.listdir(os.path.join(data_dir, 'test')))
+with open('submission.csv', 'w') as f:
+    f.write('id,' + ','.join(list(train_ds_full.label_map.keys())) + '\n')
+    for i, output in zip(ids, preds):
+        f.write(
+            i.split('.')[0] + ',' + ','.join([str(num)
+                                              for num in output]) + '\n')
