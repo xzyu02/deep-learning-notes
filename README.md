@@ -2,8 +2,9 @@
 Followed Dive Into Deep Learning Book by Dr. Mu Li
 
 ## Resources
-- Access the book through this [link](https://d2l.ai/index.html)
+- Access the book through this [link](https://d2l.ai/index.html).
 - Access video lecture (Chinese) at [Bilibili](https://space.bilibili.com/1567748478/channel/seriesdetail?sid=358497), or [YouTube](https://www.youtube.com/playlist?list=PLBGvQkBc2Hq_xInrqZ5Vang22P0ceqpNY).
+- Access d2l code implementation through [Official Repository](https://github.com/d2l-ai/d2l-en/blob/master/d2l/torch.py).
 
 ## Kaggle Competitions I have completed
 - [House Prices - Advanced Regression Techniques](https://www.kaggle.com/c/house-prices-advanced-regression-techniques)

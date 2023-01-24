@@ -142,51 +142,6 @@ def try_all_gpus():
              for i in range(torch.cuda.device_count())]
     return devices if devices else [torch.device('cpu')]
 
-'''Accuracy Section'''
-size = lambda x, *args, **kwargs: x.numel(*args, **kwargs)
-reduce_sum = lambda x, *args, **kwargs: x.sum(*args, **kwargs)
-argmax = lambda x, *args, **kwargs: x.argmax(*args, **kwargs)
-astype = lambda x, *args, **kwargs: x.type(*args, **kwargs)
-
-def accuracy(y_hat, y):
-    """Compute the number of correct predictions."""
-    if len(y_hat.shape) > 1 and y_hat.shape[1] > 1:
-        y_hat = argmax(y_hat, axis=1)
-    cmp = astype(y_hat, y.dtype) == y
-    return float(reduce_sum(astype(cmp, y.dtype)))
-
-def evaluate_accuracy_gpu(net, data_iter, device=None):
-    """Compute the accuracy for a model on a dataset using a GPU."""
-    if isinstance(net, nn.Module):
-        net.eval()  # Set the model to evaluation mode
-        if not device:
-            device = next(iter(net.parameters())).device
-    # No. of correct predictions, no. of predictions
-    metric = Accumulator(2)
-
-    with torch.no_grad():
-        for X, y in data_iter:
-            if isinstance(X, list):
-                # Required for BERT Fine-tuning (to be covered later)
-                X = [x.to(device) for x in X]
-            else:
-                X = X.to(device)
-            y = y.to(device)
-            metric.add(accuracy(net(X), y), size(y))
-    return metric[0] / metric[1]
-
-loss = nn.CrossEntropyLoss(reduction='none')
-
-def evaluate_loss(data_iter, net, devices):
-    l_sum, n = 0.0, 0
-    for features, labels in data_iter:
-        features, labels = features.to(devices[0]), labels.to(devices[0])
-        outputs = net(features)
-        l = loss(outputs, labels)
-        l_sum += l.sum()
-        n += labels.numel()
-    return l_sum / n
-
 """Data Loding"""
 import shutil
 import collections
@@ -233,22 +188,18 @@ def reorg_test(data_dir):
 
 transform_train = torchvision.transforms.Compose([
     # random scale object from 0.08 to 1 (full size)
-    torchvision.transforms.RandomResizedCrop(224, scale=(0.08, 1.0),
-                                             ratio=(3.0 / 4.0, 4.0 / 3.0)),
+    torchvision.transforms.RandomResizedCrop(224, scale=(0.08, 1.0), ratio=(3.0 / 4.0, 4.0 / 3.0)),
     torchvision.transforms.RandomHorizontalFlip(),
     # random change brightness, contrast, saturation by 40% up and down
-    torchvision.transforms.ColorJitter(brightness=0.4, contrast=0.4,
-                                       saturation=0.4),
+    torchvision.transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
     torchvision.transforms.ToTensor(),
-    torchvision.transforms.Normalize([0.485, 0.456, 0.406],
-                                     [0.229, 0.224, 0.225])])
+    torchvision.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
 
 transform_test = torchvision.transforms.Compose([
     torchvision.transforms.Resize(256),
     torchvision.transforms.CenterCrop(224),
     torchvision.transforms.ToTensor(),
-    torchvision.transforms.Normalize([0.485, 0.456, 0.406],
-                                     [0.229, 0.224, 0.225])])
+    torchvision.transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
 
 """Customized Dataset"""
 from PIL import Image
@@ -294,6 +245,51 @@ def prepare_data(batch_size=32, valid_ratio=0.1):
 
     return train_iter, valid_iter, train_valid_iter, test_iter
 
+'''Accuracy Section'''
+size = lambda x, *args, **kwargs: x.numel(*args, **kwargs)
+reduce_sum = lambda x, *args, **kwargs: x.sum(*args, **kwargs)
+argmax = lambda x, *args, **kwargs: x.argmax(*args, **kwargs)
+astype = lambda x, *args, **kwargs: x.type(*args, **kwargs)
+
+def accuracy(y_hat, y):
+    """Compute the number of correct predictions."""
+    if len(y_hat.shape) > 1 and y_hat.shape[1] > 1:
+        y_hat = argmax(y_hat, axis=1)
+    cmp = astype(y_hat, y.dtype) == y
+    return float(reduce_sum(astype(cmp, y.dtype)))
+
+def evaluate_accuracy_gpu(net, data_iter, device=None):
+    """Compute the accuracy for a model on a dataset using a GPU."""
+    if isinstance(net, nn.Module):
+        net.eval()  # Set the model to evaluation mode
+        if not device:
+            device = next(iter(net.parameters())).device
+    # No. of correct predictions, no. of predictions
+    metric = Accumulator(2)
+
+    with torch.no_grad():
+        for X, y in data_iter:
+            if isinstance(X, list):
+                # Required for BERT Fine-tuning (to be covered later)
+                X = [x.to(device) for x in X]
+            else:
+                X = X.to(device)
+            y = y.to(device)
+            metric.add(accuracy(net(X), y), size(y))
+    return metric[0] / metric[1]
+
+loss = nn.CrossEntropyLoss(reduction='none')
+
+def evaluate_loss(data_iter, net, devices):
+    l_sum, n = 0.0, 0
+    for features, labels in data_iter:
+        features, labels = features.to(devices[0]), labels.to(devices[0])
+        outputs = net(features)
+        l = loss(outputs, labels)
+        l_sum += l.sum()
+        n += labels.numel()
+    return l_sum / n
+
 '''Training Section'''
 
 def train_batch(net, X, y, loss, trainer, devices):
@@ -315,13 +311,13 @@ def train_batch(net, X, y, loss, trainer, devices):
     return train_loss_sum, train_acc_sum
 
 def train(net, train_iter, valid_iter, num_epochs, lr, wd, devices, lr_period, lr_decay):
-    trainer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=wd)
+    trainer = torch.optim.SGD((param for param in net.parameters() if param.requires_grad), lr=lr, momentum=0.9, weight_decay=wd)
     # use StepLR, for every `lr_period` epoch, lr = lr * lr_decay
     scheduler = torch.optim.lr_scheduler.StepLR(trainer, lr_period, lr_decay)
     num_batches, timer = len(train_iter), Timer()
     legend = ['train loss', 'train acc']
     if valid_iter is not None:
-        legend.append('valid acc')
+        legend.extend(['valid loss', 'valid acc'])
     animator = Animator(xlabel='epoch', xlim=[1, num_epochs], legend=legend)
     # Multi GPUs
     net = nn.DataParallel(net, device_ids=devices).to(devices[0])
@@ -335,53 +331,18 @@ def train(net, train_iter, valid_iter, num_epochs, lr, wd, devices, lr_period, l
             timer.stop()
             # draw animation
             if (i + 1) % (num_batches // 5) == 0 or i == num_batches - 1:
-                animator.add(epoch + (i + 1) / num_batches, (metric[0] / metric[2], metric[1] / metric[2], None))
+                animator.add(epoch + (i + 1) / num_batches, (metric[0] / metric[2], metric[1] / metric[2], None, None))
         if valid_iter is not None:
             valid_acc = evaluate_accuracy_gpu(net, valid_iter)
-            animator.add(epoch + 1, (None, None, valid_acc))
+            valid_loss = evaluate_loss(valid_iter, net, devices).detach().cpu()
+            animator.add(epoch + 1, (None, None, valid_loss, valid_acc))
         scheduler.step()
-    measures = (f'train loss {metric[0] / metric[2]:.3f}, '
-                f'train acc {metric[1] / metric[2]:.3f}')
+    measures = (f'train loss {metric[0] / metric[2]:.3f}, 'f'train acc {metric[1] / metric[2]:.3f}')
     if valid_iter is not None:
-        measures += f', valid acc {valid_acc:.3f}'
-    print(measures + f'\n{metric[2] * num_epochs / timer.sum():.1f}'
-          f' examples/sec on {str(devices)}')
+        measures += f', valid loss {valid_loss:.3f}, valid acc {valid_acc:.3f}'
+    print(measures + f'\n{metric[2] * num_epochs / timer.sum():.1f}'f' examples/sec on {str(devices)}')
 
-def train(net, train_iter, valid_iter, num_epochs, lr, wd, devices, lr_period, lr_decay):
-    net = nn.DataParallel(net, device_ids=devices).to(devices[0])
-    trainer = torch.optim.SGD(
-        (param for param in net.parameters() if param.requires_grad), lr=lr,
-        momentum=0.9, weight_decay=wd)
-    scheduler = torch.optim.lr_scheduler.StepLR(trainer, lr_period, lr_decay)
-    num_batches, timer = len(train_iter), Timer()
-    legend = ['train loss']
-    if valid_iter is not None:
-        legend.append('valid loss')
-    animator = Animator(xlabel='epoch', xlim=[1, num_epochs],
-                            legend=legend)
-    for epoch in range(num_epochs):
-        metric = Accumulator(2)
-        for i, (features, labels) in enumerate(train_iter):
-            timer.start()
-            features, labels = features.to(devices[0]), labels.to(devices[0])
-            trainer.zero_grad()
-            output = net(features)
-            l = loss(output, labels).sum()
-            l.backward()
-            trainer.step()
-            metric.add(l, labels.shape[0])
-            timer.stop()
-            if (i + 1) % (num_batches // 5) == 0 or i == num_batches - 1:
-                animator.add(epoch + (i + 1) / num_batches, (metric[0] / metric[1], None))
-        measures = f'train loss {metric[0] / metric[1]:.3f}'
-        if valid_iter is not None:
-            valid_loss = evaluate_loss(valid_iter, net, devices)
-            animator.add(epoch + 1, (None, valid_loss.detach().cpu()))
-        scheduler.step()
-    if valid_iter is not None:
-        measures += f', valid loss {valid_loss:.3f}'
-    print(measures + f'\n{metric[1] * num_epochs / timer.sum():.1f}'
-          f' examples/sec on {str(devices)}')
+
 
 """Train Starter"""
 devices, num_epochs, lr, wd = try_all_gpus(), 10, 1e-4, 1e-4
